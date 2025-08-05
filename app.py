@@ -1207,22 +1207,101 @@ def load_sample_prompts_only(project_name):
     
     return gr.update()
     """
-    Loads only the sample prompts for a project (fix for event conflict)
+    Clears the current project and resets UI to initial state
+    Returns: Updates for all main UI components
     """
-    if not project_name or project_name == "Select a project...":
-        return gr.update()
-        
-    prompts_path = os.path.join("outputs", project_name, "sample_prompts.txt")
-    if os.path.exists(prompts_path):
-        try:
-            with open(prompts_path, 'r', encoding='utf-8') as f:
-                sample_prompts = f.read().strip()
-            print(f"🔧 SECOND PASS: Loading sample prompts: {len(sample_prompts)} chars")
-            return gr.update(value=sample_prompts)
-        except Exception as e:
-            print(f"Error in second pass loading sample prompts: {e}")
+    print("🧹 Clearing project - resetting UI to initial state")
     
-    return gr.update()
+    # Default values for UI reset
+    return (
+        gr.update(value=""),                    # lora_name
+        gr.update(value=""),                    # concept_sentence  
+        gr.update(value=512),                   # resolution
+        gr.update(value=10),                    # num_repeats
+        gr.update(value=""),                    # sample_prompts
+        gr.update(value="20G"),                 # vram
+        gr.update(value=16),                    # max_train_epochs
+        gr.update(),                            # base_model (keep current)
+        gr.update(value=""),                    # train_script
+        gr.update(value=""),                    # train_config
+        gr.update(value=0),                     # total_steps
+        gr.update(value="Select a project..."), # project_dropdown
+        gr.update(value=""),                    # current_project state
+        gr.update(value="🧹 Project cleared. Ready for new training setup.")  # load_status
+    )
+
+def clear_project_captioning_ui():
+    """
+    Clears the captioning UI (hides all image/caption rows)
+    Returns: Updates for all captioning output_components
+    """
+    print("🧹 Clearing captioning UI")
+    
+    updates = []
+    
+    # Hide captioning_area
+    updates.append(gr.update(visible=False))
+    
+    # Hide all captioning rows (1 to MAX_IMAGES)
+    for i in range(1, MAX_IMAGES + 1):
+        updates.append(gr.update(visible=False))    # captioning_row
+        updates.append(gr.update(value=None, visible=False))   # image
+        updates.append(gr.update(value="", visible=False))     # caption
+    
+    # Hide start button areas
+    updates.append(gr.update(visible=False))    # start button area 1
+    updates.append(gr.update(visible=False))    # start button area 2
+    
+    return updates
+
+def clear_project():
+    """
+    Clears the current project and resets UI to initial state
+    Returns: Updates for all main UI components
+    """
+    print("🧹 Clearing project - resetting UI to initial state")
+    
+    # Default values for UI reset
+    return (
+        gr.update(value=""),                    # lora_name
+        gr.update(value=""),                    # concept_sentence  
+        gr.update(value=512),                   # resolution
+        gr.update(value=10),                    # num_repeats
+        gr.update(value=""),                    # sample_prompts
+        gr.update(value="20G"),                 # vram
+        gr.update(value=16),                    # max_train_epochs
+        gr.update(),                            # base_model (keep current)
+        gr.update(value=""),                    # train_script
+        gr.update(value=""),                    # train_config
+        gr.update(value=""),                        # total_steps (empty string for Textbox)
+        gr.update(value="Select a project..."), # project_dropdown
+        gr.update(value=""),                    # current_project state
+        gr.update(value="🔄 Form reset. Ready for new training setup.")  # load_status
+    )
+
+def clear_project_captioning_ui():
+    """
+    Clears the captioning UI (hides all image/caption rows)
+    Returns: Updates for all captioning output_components
+    """
+    print("🧹 Clearing captioning UI")
+    
+    updates = []
+    
+    # Hide captioning_area
+    updates.append(gr.update(visible=False))
+    
+    # Hide all captioning rows (1 to MAX_IMAGES)
+    for i in range(1, MAX_IMAGES + 1):
+        updates.append(gr.update(visible=False))    # captioning_row
+        updates.append(gr.update(value=None, visible=False))   # image
+        updates.append(gr.update(value="", visible=False))     # caption
+    
+    # Hide start button areas
+    updates.append(gr.update(visible=False))    # start button area 1
+    updates.append(gr.update(visible=False))    # start button area 2
+    
+    return updates
 
 # =============================================================================
 # GRADIO UI
@@ -1376,7 +1455,7 @@ with gr.Blocks(elem_id="app", theme=theme, css=css, fill_width=True) as demo:
                     vram = gr.Radio(["20G", "16G", "12G" ], value="20G", label="VRAM", interactive=True)
                     num_repeats = gr.Number(value=10, precision=0, label="Repeat trains per image", interactive=True)
                     max_train_epochs = gr.Number(label="Max Train Epochs", value=16, interactive=True)
-                    total_steps = gr.Number(0, interactive=False, label="Expected training steps")
+                    total_steps = gr.Textbox("", interactive=False, label="Expected training steps")
                     sample_prompts = gr.Textbox("", lines=5, label="Sample Image Prompts (Separate with new lines)", interactive=True)
                     sample_every_n_steps = gr.Number(0, precision=0, label="Sample Image Every N Steps", interactive=True)
                     resolution = gr.Number(value=512, precision=0, label="Resize dataset images")
@@ -1428,8 +1507,10 @@ with gr.Blocks(elem_id="app", theme=theme, css=css, fill_width=True) as demo:
                         """# Step 3. Train
         <p style="margin-top:0">Press start to start training.</p>
         """, elem_classes="group_padding")
-                    refresh = gr.Button("Refresh", elem_id="refresh", visible=False)
-                    start = gr.Button("Start training", visible=False, elem_id="start_training")
+                    with gr.Row():
+                        refresh = gr.Button("Refresh", elem_id="refresh", visible=False)
+                        start = gr.Button("Start training", visible=False, elem_id="start_training")
+                        clear_btn = gr.Button("🔄 Reset Form", variant="secondary")
                     output_components.append(start)
                     train_script = gr.Textbox(label="Train script", max_lines=100, interactive=True)
                     train_config = gr.Textbox(label="Train config", max_lines=100, interactive=True)
@@ -1638,6 +1719,35 @@ with gr.Blocks(elem_id="app", theme=theme, css=css, fill_width=True) as demo:
         fn=calculate_total_steps_for_loaded_project,
         inputs=[project_dropdown],
         outputs=[total_steps]
+    )
+
+    # Clear project functionality - two steps to avoid timing issues
+    clear_btn.click(
+        # Step 1: Clear current project state first to prevent auto-recalculation
+        fn=lambda: "",
+        outputs=[current_project]
+    ).then(
+        # Step 2: Clear main UI components
+        fn=clear_project,
+        outputs=[
+            lora_name,              # LoRA Name
+            concept_sentence,       # Trigger Word 
+            resolution,             # Resolution
+            num_repeats,            # Num Repeats
+            sample_prompts,         # Sample Prompts
+            vram,                   # VRAM Setting
+            max_train_epochs,       # Max Train Epochs
+            base_model,             # Base Model (no change)
+            train_script,           # Train Script
+            train_config,           # Train Config
+            total_steps,            # Expected training steps
+            project_dropdown,       # Reset dropdown
+            load_status             # Status Message
+        ]
+    ).then(
+        # Step 3: Clear captioning UI (hide all image/caption rows)
+        fn=clear_project_captioning_ui,
+        outputs=output_components  # This clears the captioning table
     )
 
     # Initial loads
