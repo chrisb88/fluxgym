@@ -533,14 +533,56 @@ keep_tokens = 1
   num_repeats = {num_repeats}"""
     return toml
 
-def update_total_steps(max_train_epochs, num_repeats, images):
+def update_total_steps(max_train_epochs, num_repeats, images, current_project=""):
+    """
+    Extended version that works with both images and loaded projects
+    """
     try:
-        num_images = len(images)
-        total_steps = max_train_epochs * num_images * num_repeats
-        print(f"max_train_epochs={max_train_epochs} num_images={num_images}, num_repeats={num_repeats}, total_steps={total_steps}")
-        return gr.update(value = total_steps)
-    except:
-        print("")
+        num_images = 0
+        
+        # First try to get count from images widget (normal upload)
+        if images and len(images) > 0:
+            num_images = len(images)
+            print(f"📊 Using uploaded images: {num_images}")
+        
+        # If no images, but current_project available (loaded project)
+        elif current_project and current_project != "Select a project...":
+            project_data = load_project_data(current_project)
+            if project_data:
+                num_images = len(project_data.get('images', []))
+                print(f"📊 Using loaded project images: {num_images} from '{current_project}'")
+        
+        if num_images > 0:
+            total_steps = max_train_epochs * num_images * num_repeats
+            print(f"📊 Calculated: {max_train_epochs} epochs × {num_images} images × {num_repeats} repeats = {total_steps}")
+            return gr.update(value=total_steps)
+        else:
+            print("📊 No images found for calculation")
+            return gr.update(value=0)
+            
+    except Exception as e:
+        print(f"Error in update_total_steps: {e}")
+        return gr.update()
+
+def update_total_steps_from_loaded_project(max_train_epochs, num_repeats, project_name):
+    """
+    Alternative version of update_total_steps for loaded projects
+    """
+    try:
+        if not project_name or project_name == "Select a project...":
+            return gr.update()
+            
+        # Get number of images from loaded project
+        project_data = load_project_data(project_name)
+        if project_data:
+            num_images = len(project_data.get('images', []))
+            total_steps = max_train_epochs * num_images * num_repeats
+            print(f"📊 Updated total steps from loaded project: {max_train_epochs} × {num_images} × {num_repeats} = {total_steps}")
+            return gr.update(value=total_steps)
+    except Exception as e:
+        print(f"Error updating total steps from loaded project: {e}")
+    
+    return gr.update()
 
 def set_repo(lora_rows):
     selected_name = os.path.basename(lora_rows)
@@ -698,6 +740,7 @@ def loaded():
         return gr.update(value=""), gr.update(visible=True), gr.update(visible=False), gr.update(value="", visible=False)
 
 def update_sample(concept_sentence):
+    # IMPORTANT: Only update if sample_prompts is empty (prevents overwriting when loading project)
     return gr.update(value=concept_sentence)
 
 def refresh_publish_tab():
@@ -801,6 +844,468 @@ def init_advanced():
             advanced_component_ids.append(component.elem_id)
     return advanced_components, advanced_component_ids
 
+# =============================================================================
+# LOAD PROJECT FUNCTIONS
+# =============================================================================
+
+def scan_existing_projects():
+    """
+    Scans for complete FluxGym projects
+    Returns: List of project names that can be loaded
+    """
+    projects = []
+
+    try:
+        outputs_path = "outputs"
+        if not os.path.exists(outputs_path):
+            return []
+
+        for item in os.listdir(outputs_path):
+            project_path = os.path.join(outputs_path, item)
+            dataset_path = os.path.join("datasets", item)
+            toml_path = os.path.join(project_path, "dataset.toml")
+
+            # Check if complete project exists
+            if (os.path.isdir(project_path) and
+                os.path.isdir(dataset_path) and
+                os.path.exists(toml_path)):
+
+                # Additionally check if images are present in dataset
+                images = get_project_images(item)
+                if len(images) > 0:
+                    projects.append(item)
+
+    except Exception as e:
+        print(f"Error scanning projects: {e}")
+
+    projects.sort(reverse=True)  # Newest first
+    return projects
+
+def get_project_images(project_name):
+    """
+    Gets all images of a project from the datasets/ folder
+    Returns: List of (image_path, caption_text) tuples
+    """
+    images = []
+    dataset_path = os.path.join("datasets", project_name)
+
+    if not os.path.exists(dataset_path):
+        return images
+
+    try:
+        # Supported image formats
+        image_extensions = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff'}
+
+        for file in os.listdir(dataset_path):
+            file_path = os.path.join(dataset_path, file)
+            if os.path.isfile(file_path):
+                name, ext = os.path.splitext(file)
+
+                if ext.lower() in image_extensions:
+                    # Search for caption file
+                    caption_path = os.path.join(dataset_path, f"{name}.txt")
+                    caption_text = ""
+
+                    if os.path.exists(caption_path):
+                        try:
+                            with open(caption_path, 'r', encoding='utf-8') as f:
+                                caption_text = f.read().strip()
+                        except Exception as e:
+                            print(f"Error reading caption {caption_path}: {e}")
+
+                    images.append((file_path, caption_text))
+
+    except Exception as e:
+        print(f"Error getting project images: {e}")
+
+    return images
+
+def load_project_settings(project_name):
+    """
+    Loads training settings from dataset.toml
+    Returns: Dict with settings or None
+    """
+    toml_path = os.path.join("outputs", project_name, "dataset.toml")
+
+    if not os.path.exists(toml_path):
+        return None
+
+    try:
+        config = toml.load(toml_path)
+
+        # Extract relevant settings
+        settings = {}
+
+        # General settings
+        if 'general' in config:
+            general = config['general']
+            settings['caption_extension'] = general.get('caption_extension', '.txt')
+            settings['shuffle_caption'] = general.get('shuffle_caption', False)
+
+        # Dataset settings
+        if 'datasets' in config and len(config['datasets']) > 0:
+            dataset = config['datasets'][0]
+            settings['resolution'] = dataset.get('resolution', 512)
+            settings['batch_size'] = dataset.get('batch_size', 1)
+
+            # Subset settings (here is the class_tokens/trigger word)
+            if 'subsets' in dataset and len(dataset['subsets']) > 0:
+                subset = dataset['subsets'][0]
+                settings['class_tokens'] = subset.get('class_tokens', '')
+                settings['num_repeats'] = subset.get('num_repeats', 10)
+
+        return settings
+
+    except Exception as e:
+        print(f"Error loading project settings: {e}")
+        return None
+
+def load_project_data(project_name):
+    """
+    Loads all data of a project
+    Returns: Dict with all project data
+    """
+    if not project_name:
+        return None
+
+    # Load images and captions
+    images = get_project_images(project_name)
+
+    # Load settings
+    settings = load_project_settings(project_name)
+
+    # Load sample prompts (if available)
+    sample_prompts = ""
+    prompts_path = os.path.join("outputs", project_name, "sample_prompts.txt")
+    
+    if os.path.exists(prompts_path):
+        try:
+            with open(prompts_path, 'r', encoding='utf-8') as f:
+                sample_prompts = f.read().strip()
+        except Exception as e:
+            print(f"Error reading sample prompts: {e}")
+
+    # Load train script (train.bat or train.sh)
+    train_script = ""
+    script_extensions = ['.bat', '.sh']
+    for ext in script_extensions:
+        script_path = os.path.join("outputs", project_name, f"train{ext}")
+        if os.path.exists(script_path):
+            try:
+                with open(script_path, 'r', encoding='utf-8') as f:
+                    train_script = f.read()
+                break
+            except Exception as e:
+                print(f"Error reading train script {script_path}: {e}")
+
+    # Load dataset config (dataset.toml)
+    train_config = ""
+    toml_path = os.path.join("outputs", project_name, "dataset.toml")
+    if os.path.exists(toml_path):
+        try:
+            with open(toml_path, 'r', encoding='utf-8') as f:
+                train_config = f.read()
+        except Exception as e:
+            print(f"Error reading dataset.toml {toml_path}: {e}")
+
+    return {
+        'name': project_name,
+        'images': images,
+        'settings': settings or {},
+        'sample_prompts': sample_prompts,
+        'train_script': train_script,
+        'train_config': train_config
+    }
+
+def populate_original_captioning_ui(project_data):
+    """
+    Populates the original captioning UI (table) with project data
+    Returns: Updates for all output_components (like load_captioning)
+    """
+    if not project_data or not project_data.get('images'):
+        # Empty updates if no data
+        updates = [gr.update(visible=False)]  # captioning_area
+        for i in range(1, MAX_IMAGES + 1):
+            updates.append(gr.update(visible=False))  # captioning_row
+            updates.append(gr.update(value=None, visible=False))  # image
+            updates.append(gr.update(value="", visible=False))  # caption
+        updates.append(gr.update(visible=False))  # start button area 1
+        updates.append(gr.update(visible=False))  # start button area 2  
+        return updates
+
+    images = project_data['images']
+    concept_sentence = project_data['settings'].get('class_tokens', '')
+    
+    updates = []
+    
+    # Make captioning_area visible
+    updates.append(gr.update(visible=True))
+    
+    # For each row (1 to MAX_IMAGES)
+    for i in range(1, MAX_IMAGES + 1):
+        visible = i <= len(images)
+        
+        if visible:
+            image_path, caption_text = images[i - 1]
+            
+            # Row visible
+            updates.append(gr.update(visible=True))
+            
+            # Set image
+            updates.append(gr.update(value=image_path, visible=True))
+            
+            # Set caption (or concept_sentence as fallback)
+            final_caption = caption_text if caption_text else concept_sentence
+            updates.append(gr.update(value=final_caption, visible=True))
+        else:
+            # Hide row
+            updates.append(gr.update(visible=False))
+            updates.append(gr.update(value=None, visible=False))
+            updates.append(gr.update(value="", visible=False))
+    
+    # Make sample caption area and start button visible
+    updates.append(gr.update(visible=True))
+    updates.append(gr.update(visible=True))
+    
+    return updates
+
+def on_load_project(project_name):
+    """
+    Event handler when a project is loaded - settings only
+    Returns: Updates for the main UI components
+    """
+    if not project_name or project_name == "Select a project...":
+        # Empty update if nothing selected
+        return (
+            gr.update(),  # lora_name
+            gr.update(),  # concept_sentence
+            gr.update(),  # resolution
+            gr.update(),  # num_repeats
+            gr.update(),  # sample_prompts
+            gr.update(),  # vram
+            gr.update(),  # max_train_epochs
+            gr.update(),  # base_model
+            gr.update(),  # train_script
+            gr.update(),  # train_config
+            gr.update(),  # total_steps (leave empty for now)
+            gr.update(value="ℹ️ Select a project from the dropdown to load it.")  # load_status
+        )
+
+    try:
+        # Load project data
+        project_data = load_project_data(project_name)
+
+        if not project_data:
+            return (
+                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                gr.update(), gr.update(value="❌ Failed to load project data.")
+            )
+
+        settings = project_data.get('settings', {})
+        sample_prompts_content = project_data.get('sample_prompts', '')
+
+        # Generate UI updates
+        lora_name_update = gr.update(value=project_data['name'])
+        trigger_word_update = gr.update(value=settings.get('class_tokens', ''))
+        resolution_update = gr.update(value=settings.get('resolution', 512))
+        num_repeats_update = gr.update(value=settings.get('num_repeats', 10))
+        sample_prompts_update = gr.update(value=sample_prompts_content)
+        
+        vram_update = gr.update(value="20G")
+        max_epochs_update = gr.update(value=16)
+        base_model_update = gr.update()
+
+        # Train script and config updates
+        train_script_update = gr.update(value=project_data.get('train_script', ''))
+        train_config_update = gr.update(value=project_data.get('train_config', ''))
+
+        # TOTAL STEPS: Leave empty for now - will be calculated in next step
+        total_steps_update = gr.update()
+
+        # Status message
+        num_images = len(project_data.get('images', []))
+        status_msg = f"✅ Loaded project '{project_data['name']}' with {num_images} images"
+        if sample_prompts_content:
+            status_msg += f" and {len(sample_prompts_content.splitlines())} sample prompts"
+        status_update = gr.update(value=status_msg)
+
+        return (
+            lora_name_update, trigger_word_update, resolution_update, num_repeats_update,
+            sample_prompts_update, vram_update, max_epochs_update, base_model_update,
+            train_script_update, train_config_update, total_steps_update, status_update
+        )
+
+    except Exception as e:
+        print(f"Error loading project: {e}")
+        return (
+            gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+            gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+            gr.update(), gr.update(value=f"❌ Error loading project: {str(e)}")
+        )
+
+def load_project_captioning_ui(project_name):
+    """
+    Loads the captioning UI for a project (table with image + caption)
+    """
+    if not project_name or project_name == "Select a project...":
+        return populate_original_captioning_ui(None)
+    
+    try:
+        project_data = load_project_data(project_name)
+        return populate_original_captioning_ui(project_data)
+    except Exception as e:
+        print(f"Error loading captioning UI: {e}")
+        return populate_original_captioning_ui(None)
+
+def refresh_projects_list():
+    """
+    Refreshes the list of available projects
+    """
+    projects = scan_existing_projects()
+    choices = ["Select a project..."] + projects
+    return gr.update(choices=choices, value="Select a project...")
+
+def calculate_total_steps_for_loaded_project(project_name):
+    """
+    Calculates total_steps for a loaded project AFTER the UI update
+    """
+    if not project_name or project_name == "Select a project...":
+        return gr.update()
+        
+    try:
+        project_data = load_project_data(project_name)
+        if project_data:
+            num_images = len(project_data.get('images', []))
+            num_repeats = project_data.get('settings', {}).get('num_repeats', 10)
+            max_epochs = 16  # Default UI value
+            
+            total_steps = max_epochs * num_images * num_repeats
+            print(f"📊 Final total steps calculation: {max_epochs} × {num_images} × {num_repeats} = {total_steps}")
+            return gr.update(value=total_steps)
+    except Exception as e:
+        print(f"Error calculating total steps: {e}")
+    
+    return gr.update()
+
+def load_sample_prompts_only(project_name):
+    """
+    Loads only the sample prompts for a project (fix for event conflict)
+    """
+    if not project_name or project_name == "Select a project...":
+        return gr.update()
+        
+    prompts_path = os.path.join("outputs", project_name, "sample_prompts.txt")
+    if os.path.exists(prompts_path):
+        try:
+            with open(prompts_path, 'r', encoding='utf-8') as f:
+                sample_prompts = f.read().strip()
+            print(f"🔧 SECOND PASS: Loading sample prompts: {len(sample_prompts)} chars")
+            return gr.update(value=sample_prompts)
+        except Exception as e:
+            print(f"Error in second pass loading sample prompts: {e}")
+    
+    return gr.update()
+    """
+    Clears the current project and resets UI to initial state
+    Returns: Updates for all main UI components
+    """
+    print("🧹 Clearing project - resetting UI to initial state")
+    
+    # Default values for UI reset
+    return (
+        gr.update(value=""),                    # lora_name
+        gr.update(value=""),                    # concept_sentence  
+        gr.update(value=512),                   # resolution
+        gr.update(value=10),                    # num_repeats
+        gr.update(value=""),                    # sample_prompts
+        gr.update(value="20G"),                 # vram
+        gr.update(value=16),                    # max_train_epochs
+        gr.update(),                            # base_model (keep current)
+        gr.update(value=""),                    # train_script
+        gr.update(value=""),                    # train_config
+        gr.update(value=0),                     # total_steps
+        gr.update(value="Select a project..."), # project_dropdown
+        gr.update(value=""),                    # current_project state
+        gr.update(value="🧹 Project cleared. Ready for new training setup.")  # load_status
+    )
+
+def clear_project_captioning_ui():
+    """
+    Clears the captioning UI (hides all image/caption rows)
+    Returns: Updates for all captioning output_components
+    """
+    print("🧹 Clearing captioning UI")
+    
+    updates = []
+    
+    # Hide captioning_area
+    updates.append(gr.update(visible=False))
+    
+    # Hide all captioning rows (1 to MAX_IMAGES)
+    for i in range(1, MAX_IMAGES + 1):
+        updates.append(gr.update(visible=False))    # captioning_row
+        updates.append(gr.update(value=None, visible=False))   # image
+        updates.append(gr.update(value="", visible=False))     # caption
+    
+    # Hide start button areas
+    updates.append(gr.update(visible=False))    # start button area 1
+    updates.append(gr.update(visible=False))    # start button area 2
+    
+    return updates
+
+def clear_project():
+    """
+    Clears the current project and resets UI to initial state
+    Returns: Updates for all main UI components
+    """
+    print("🧹 Clearing project - resetting UI to initial state")
+    
+    # Default values for UI reset
+    return (
+        gr.update(value=""),                    # lora_name
+        gr.update(value=""),                    # concept_sentence  
+        gr.update(value=512),                   # resolution
+        gr.update(value=10),                    # num_repeats
+        gr.update(value=""),                    # sample_prompts
+        gr.update(value="20G"),                 # vram
+        gr.update(value=16),                    # max_train_epochs
+        gr.update(),                            # base_model (keep current)
+        gr.update(value=""),                    # train_script
+        gr.update(value=""),                    # train_config
+        gr.update(value=""),                        # total_steps (empty string for Textbox)
+        gr.update(value="Select a project..."), # project_dropdown
+        gr.update(value=""),                    # current_project state
+        gr.update(value="🔄 Form reset. Ready for new training setup.")  # load_status
+    )
+
+def clear_project_captioning_ui():
+    """
+    Clears the captioning UI (hides all image/caption rows)
+    Returns: Updates for all captioning output_components
+    """
+    print("🧹 Clearing captioning UI")
+    
+    updates = []
+    
+    # Hide captioning_area
+    updates.append(gr.update(visible=False))
+    
+    # Hide all captioning rows (1 to MAX_IMAGES)
+    for i in range(1, MAX_IMAGES + 1):
+        updates.append(gr.update(visible=False))    # captioning_row
+        updates.append(gr.update(value=None, visible=False))   # image
+        updates.append(gr.update(value="", visible=False))     # caption
+    
+    # Hide start button areas
+    updates.append(gr.update(visible=False))    # start button area 1
+    updates.append(gr.update(visible=False))    # start button area 2
+    
+    return updates
+
+# =============================================================================
+# GRADIO UI
+# =============================================================================
 
 theme = gr.themes.Monochrome(
     text_size=gr.themes.Size(lg="18px", md="15px", sm="13px", xl="22px", xs="12px", xxl="24px", xxs="9px"),
@@ -903,6 +1408,31 @@ with gr.Blocks(elem_id="app", theme=theme, css=css, fill_width=True) as demo:
         """)
             with gr.Row(elem_id='container'):
                 with gr.Column():
+                    # =============================================================================
+                    # LOAD PROJECT SECTION - Added at the top
+                    # =============================================================================
+                    gr.Markdown("## 🔄 Load Existing Project")
+                    with gr.Row():
+                        with gr.Column(scale=3):
+                            project_dropdown = gr.Dropdown(
+                                label="Select Project",
+                                choices=["Select a project..."],
+                                value="Select a project...",
+                                interactive=True
+                            )
+                        with gr.Column(scale=1):
+                            refresh_btn = gr.Button("🔄 Refresh", size="sm")
+                        with gr.Column(scale=1):
+                            load_btn = gr.Button("📂 Load Project", variant="primary")
+
+                    with gr.Row():
+                        load_status = gr.Markdown("ℹ️ Select a project from the dropdown to load it.")
+
+                    # No separate preview - we use the original captioning UI
+
+                    # =============================================================================
+                    # ORIGINAL STEP 1 - LoRA Info
+                    # =============================================================================
                     gr.Markdown(
                         """# Step 1. LoRA Info
         <p style="margin-top:0">Configure your LoRA train settings.</p>
@@ -925,10 +1455,11 @@ with gr.Blocks(elem_id="app", theme=theme, css=css, fill_width=True) as demo:
                     vram = gr.Radio(["20G", "16G", "12G" ], value="20G", label="VRAM", interactive=True)
                     num_repeats = gr.Number(value=10, precision=0, label="Repeat trains per image", interactive=True)
                     max_train_epochs = gr.Number(label="Max Train Epochs", value=16, interactive=True)
-                    total_steps = gr.Number(0, interactive=False, label="Expected training steps")
+                    total_steps = gr.Textbox("", interactive=False, label="Expected training steps")
                     sample_prompts = gr.Textbox("", lines=5, label="Sample Image Prompts (Separate with new lines)", interactive=True)
                     sample_every_n_steps = gr.Number(0, precision=0, label="Sample Image Every N Steps", interactive=True)
                     resolution = gr.Number(value=512, precision=0, label="Resize dataset images")
+
                 with gr.Column():
                     gr.Markdown(
                         """# Step 2. Dataset
@@ -976,8 +1507,10 @@ with gr.Blocks(elem_id="app", theme=theme, css=css, fill_width=True) as demo:
                         """# Step 3. Train
         <p style="margin-top:0">Press start to start training.</p>
         """, elem_classes="group_padding")
-                    refresh = gr.Button("Refresh", elem_id="refresh", visible=False)
-                    start = gr.Button("Start training", visible=False, elem_id="start_training")
+                    with gr.Row():
+                        refresh = gr.Button("Refresh", elem_id="refresh", visible=False)
+                        start = gr.Button("Start training", visible=False, elem_id="start_training")
+                        clear_btn = gr.Button("🔄 Reset Form", variant="secondary")
                     output_components.append(start)
                     train_script = gr.Textbox(label="Train script", max_lines=100, interactive=True)
                     train_config = gr.Textbox(label="Train config", max_lines=100, interactive=True)
@@ -1038,6 +1571,7 @@ with gr.Blocks(elem_id="app", theme=theme, css=css, fill_width=True) as demo:
     lora_rows.select(fn=set_repo, inputs=[lora_rows], outputs=[repo_name])
 
     dataset_folder = gr.State()
+    current_project = gr.State()  # NEW: State for currently loaded project
 
     listeners = [
         base_model,
@@ -1060,43 +1594,59 @@ with gr.Blocks(elem_id="app", theme=theme, css=css, fill_width=True) as demo:
     ]
     advanced_component_ids = [x.elem_id for x in advanced_components]
     original_advanced_component_values = [comp.value for comp in advanced_components]
+    
+    # =============================================================================
+    # ORIGINAL EVENT HANDLERS
+    # =============================================================================
     images.upload(
         load_captioning,
         inputs=[images, concept_sentence],
         outputs=output_components
+    ).then(
+        # Reset current project state on new upload
+        fn=lambda: "",
+        outputs=[current_project]
     )
     images.delete(
         load_captioning,
         inputs=[images, concept_sentence],
         outputs=output_components
+    ).then(
+        # Reset current project state
+        fn=lambda: "",
+        outputs=[current_project]
     )
     images.clear(
         hide_captioning,
         outputs=[captioning_area, start]
+    ).then(
+        # Reset current project state
+        fn=lambda: "",
+        outputs=[current_project]
     )
     max_train_epochs.change(
         fn=update_total_steps,
-        inputs=[max_train_epochs, num_repeats, images],
+        inputs=[max_train_epochs, num_repeats, images, current_project],
         outputs=[total_steps]
     )
     num_repeats.change(
         fn=update_total_steps,
-        inputs=[max_train_epochs, num_repeats, images],
+        inputs=[max_train_epochs, num_repeats, images, current_project],
         outputs=[total_steps]
     )
     images.upload(
         fn=update_total_steps,
-        inputs=[max_train_epochs, num_repeats, images],
+        inputs=[max_train_epochs, num_repeats, images, current_project],
         outputs=[total_steps]
     )
     images.delete(
         fn=update_total_steps,
-        inputs=[max_train_epochs, num_repeats, images],
+        inputs=[max_train_epochs, num_repeats, images, current_project],
         outputs=[total_steps]
     )
     images.clear(
         fn=update_total_steps,
-        inputs=[max_train_epochs, num_repeats, images],
+        inputs=[max_train_epochs, num_repeats, images, current_project],
         outputs=[total_steps]
     )
     concept_sentence.change(fn=update_sample, inputs=[concept_sentence], outputs=sample_prompts)
@@ -1112,8 +1662,98 @@ with gr.Blocks(elem_id="app", theme=theme, css=css, fill_width=True) as demo:
         outputs=terminal,
     )
     do_captioning.click(fn=run_captioning, inputs=[images, concept_sentence] + caption_list, outputs=caption_list)
-    demo.load(fn=loaded, js=js, outputs=[hf_token, hf_login, hf_logout, repo_owner])
     refresh.click(update, inputs=listeners, outputs=[train_script, train_config, dataset_folder])
+
+    # =============================================================================
+    # LOAD PROJECT EVENT HANDLERS - IMPROVED
+    # =============================================================================
+    refresh_btn.click(
+        fn=refresh_projects_list,
+        outputs=[project_dropdown]
+    )
+
+    # =============================================================================
+    # LOAD PROJECT EVENT HANDLERS - FINAL VERSION
+    # =============================================================================
+    refresh_btn.click(
+        fn=refresh_projects_list,
+        outputs=[project_dropdown]
+    )
+
+    # Load project in 3 steps to avoid event conflicts
+    load_btn.click(
+        # Step 1: Load settings
+        fn=on_load_project,
+        inputs=[project_dropdown],
+        outputs=[
+            lora_name,              # LoRA Name
+            concept_sentence,       # Trigger Word 
+            resolution,             # Resolution
+            num_repeats,            # Num Repeats
+            sample_prompts,         # Sample Prompts
+            vram,                   # VRAM Setting
+            max_train_epochs,       # Max Train Epochs
+            base_model,             # Base Model (no change)
+            train_script,           # Train Script (train.bat content)
+            train_config,           # Train Config (dataset.toml content)
+            total_steps,            # Expected training steps (FIX!)
+            load_status             # Status Message
+        ]
+    ).then(
+        # Step 2: Set sample prompts again explicitly
+        fn=lambda project_name: load_sample_prompts_only(project_name) if project_name != "Select a project..." else gr.update(),
+        inputs=[project_dropdown],
+        outputs=[sample_prompts]
+    ).then(
+        # Step 2.5: Set current project state for total_steps updates
+        fn=lambda project_name: project_name if project_name != "Select a project..." else "",
+        inputs=[project_dropdown],
+        outputs=[current_project]
+    ).then(
+        # Step 3: Fill original captioning UI (the table!)
+        fn=load_project_captioning_ui,
+        inputs=[project_dropdown],
+        outputs=output_components  # This is the original UI table
+    ).then(
+        # Step 4: Calculate total steps AFTER all UI values are set
+        fn=calculate_total_steps_for_loaded_project,
+        inputs=[project_dropdown],
+        outputs=[total_steps]
+    )
+
+    # Clear project functionality - two steps to avoid timing issues
+    clear_btn.click(
+        # Step 1: Clear current project state first to prevent auto-recalculation
+        fn=lambda: "",
+        outputs=[current_project]
+    ).then(
+        # Step 2: Clear main UI components
+        fn=clear_project,
+        outputs=[
+            lora_name,              # LoRA Name
+            concept_sentence,       # Trigger Word 
+            resolution,             # Resolution
+            num_repeats,            # Num Repeats
+            sample_prompts,         # Sample Prompts
+            vram,                   # VRAM Setting
+            max_train_epochs,       # Max Train Epochs
+            base_model,             # Base Model (no change)
+            train_script,           # Train Script
+            train_config,           # Train Config
+            total_steps,            # Expected training steps
+            project_dropdown,       # Reset dropdown
+            load_status             # Status Message
+        ]
+    ).then(
+        # Step 3: Clear captioning UI (hide all image/caption rows)
+        fn=clear_project_captioning_ui,
+        outputs=output_components  # This clears the captioning table
+    )
+
+    # Initial loads
+    demo.load(fn=loaded, js=js, outputs=[hf_token, hf_login, hf_logout, repo_owner])
+    demo.load(fn=refresh_projects_list, outputs=[project_dropdown])
+
 if __name__ == "__main__":
     cwd = os.path.dirname(os.path.abspath(__file__))
     demo.launch(debug=True, show_error=True, allowed_paths=[cwd])
